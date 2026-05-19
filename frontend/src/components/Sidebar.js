@@ -12,6 +12,7 @@ const navItems = [
   { path: '/incidents', label: 'Incidents', icon: '⚠️' },
   { path: '/impact-metrics', label: 'Impact Metrics', icon: '📊' },
   { path: '/grant-tracking', label: 'Grant Tracking', icon: '💰' },
+  { path: '/custom-views', label: 'Field Views', icon: '🗺️' },
   { path: '/ai', label: 'AI Tools', icon: '🤖' },
   { path: '/ai-predictive', label: 'AI Predictive', icon: '🔮' },
   { path: '/ai-backlog', label: 'AI Backlog Tools', icon: '🧪' },

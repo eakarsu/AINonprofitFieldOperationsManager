@@ -15,6 +15,7 @@ import AIPredictivePage from './pages/AIPredictivePage';
 import AIBacklogPage from './pages/AIBacklogPage';
 import ImpactMetricsPage from './pages/ImpactMetricsPage';
 import GrantTrackingPage from './pages/GrantTrackingPage';
+import CustomViewsPage from './pages/CustomViewsPage';
 
 // // === Batch 06 Gaps & Frontend Mounts ===
 import CFAgenticVolunteerDispatchPage from './pages/CFAgenticVolunteerDispatchPage';
@@ -94,6 +95,7 @@ export default function App() {
           <Route path="/ai-backlog" element={<AIBacklogPage showToast={showToast} />} />
           <Route path="/impact-metrics" element={<ImpactMetricsPage showToast={showToast} />} />
           <Route path="/grant-tracking" element={<GrantTrackingPage showToast={showToast} />} />
+          <Route path="/custom-views" element={<CustomViewsPage />} />
           <Route path="*" element={<Navigate to="/" />} />
         
           {/* // === Batch 06 Gaps & Frontend Mounts === */}

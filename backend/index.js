@@ -88,6 +88,12 @@ app.use('/api/gap-no-webhooks-or-third', require('./routes/gapFeat_no_webhooks_o
 app.use('/api/gap-no-file-document-storage-for-case-attachments', require('./routes/gapFeat_no_file_document_storage_for_case_attachments'));
 app.use('/api/gap-no-rbac-beyond-basic-auth-no-role-separation', require('./routes/gapFeat_no_rbac_beyond_basic_auth_no_role_separation'));
 
+// === Custom Views (Field Views) — mounted BEFORE 404 ===
+app.use('/api/custom-views', require('./routes/customViews'));
+
+// 404 fallback (must come AFTER all routes)
+app.use((req, res) => res.status(404).json({ error: 'Not found', path: req.path }));
+
 app.listen(PORT, () => console.log(`Nonprofit Field Ops backend running on port ${PORT}`));
 }).catch(err => {
   console.error('Failed to initialize DB:', err.message);
