@@ -6,7 +6,7 @@ const { aiRateLimiter } = require('../middleware/rateLimiter');
 const router = express.Router();
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'anthropic/claude-3-5-sonnet-20241022';
+const MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
 
 async function callAI(systemPrompt, userMessage, apiKey) {
   const response = await fetch(OPENROUTER_API_URL, {

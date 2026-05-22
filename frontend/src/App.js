@@ -33,6 +33,11 @@ import GapNoReportingExportPdfCsvForBoardMeetingsAndPage from './pages/GapNoRepo
 import GapNoWebhooksOrThirdPage from './pages/GapNoWebhooksOrThirdPage';
 import GapNoFileDocumentStorageForCaseAttachmentsPage from './pages/GapNoFileDocumentStorageForCaseAttachmentsPage';
 import GapNoRbacBeyondBasicAuthNoRoleSeparationPage from './pages/GapNoRbacBeyondBasicAuthNoRoleSeparationPage';
+import CodexCustomVizFeature from './pages/CodexCustomVizFeature';
+import CodexOperationsFeature from './pages/CodexOperationsFeature';
+
+import TimelineView from './pages/TimelineView';
+
 function Toast({ toast, onClose }) {
   if (!toast) return null;
   return (
@@ -82,6 +87,10 @@ export default function App() {
       <main style={{ flex: 1, overflowY: 'auto', padding: 24, background: '#0f111a' }}>
         <Toast toast={toast} onClose={() => setToast(null)} />
         <Routes>
+        <Route path="/insights/timeline" element={<TimelineView />} />
+        <Route path="/codex/custom-viz" element={<CodexCustomVizFeature />} />
+        <Route path="/codex/operations" element={<CodexOperationsFeature />} />
+
           <Route path="/" element={<Dashboard />} />
           <Route path="/volunteers" element={<VolunteersPage showToast={showToast} />} />
           <Route path="/shifts" element={<ShiftsPage showToast={showToast} />} />
