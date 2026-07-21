@@ -15,13 +15,19 @@ const inventoryRoutes = require('./routes/inventory');
 const incidentsRoutes = require('./routes/incidents');
 const aiRoutes = require('./routes/ai');
 const aiBacklogRoutes = require('./routes/aiBacklog');
+const {validateRuntime}=require('./governance/runtime');
+const {createProviderGate}=require('./governance/providerGate');
+const governanceRouter=require('./governance/router');
+validateRuntime();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(helmet());
-app.use(cors({ origin: process.env.CLIENT_URL || 'http://localhost:3000', credentials: true }));
+const allowedOrigins=String(process.env.CORS_ORIGINS||process.env.CLIENT_URL||'http://localhost:3000').split(',').map(v=>v.trim()).filter(Boolean);
+app.use(cors({origin:(origin,cb)=>!origin||allowedOrigins.includes(origin)?cb(null,true):cb(new Error('Origin not allowed by CORS')),credentials:true}));
 app.use(express.json({ limit: '10mb' }));
+app.use(createProviderGate(['/api/ai','/api/gap','/api/cf-agentic-volunteer-dispatch','/api/cf-rag-over-organizational-playbooks','/api/cf-donor-engagement-scoring','/api/cf-field-photo-upload-tagging','/api/cf-compliance-audit-agent']));
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -34,6 +40,7 @@ app.use('/api/inventory', inventoryRoutes);
 app.use('/api/incidents', incidentsRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/ai', aiBacklogRoutes);
+app.use('/api/governed-field-cases',governanceRouter);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
@@ -45,7 +52,8 @@ app.get('/api/dashboard/stats', async (req, res) => {
   if (!token) return res.status(401).json({ error: 'No token' });
   try {
     const jwt = require('jsonwebtoken');
-    jwt.verify(token, process.env.JWT_SECRET || 'changeme');
+    if(!process.env.JWT_SECRET||process.env.JWT_SECRET.length<32)throw new Error('Authentication is not configured');
+    jwt.verify(token, process.env.JWT_SECRET);
   } catch { return res.status(401).json({ error: 'Invalid token' }); }
 
   try {
@@ -66,7 +74,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 });
 
 // Initialize DB tables then start server
-createTables().then(() => {
+(process.env.ENABLE_LEGACY_SCHEMA_BOOTSTRAP==='true'?createTables():Promise.resolve()).then(() => {
   
 // === Custom Feature Mounts (batch_06) ===
 app.use('/api/cf-agentic-volunteer-dispatch', require('./routes/customFeat01_AgenticVolunteerDispatch'));
