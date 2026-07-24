@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+set -a
+source "$PROJECT_DIR/.env"
+set +a
 BACKEND_PORT="${BACKEND_PORT:-3001}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 CHILD_PIDS=()

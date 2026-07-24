@@ -27,7 +27,7 @@ app.use(helmet());
 const allowedOrigins=String(process.env.CORS_ORIGINS||process.env.CLIENT_URL||'http://localhost:3000').split(',').map(v=>v.trim()).filter(Boolean);
 app.use(cors({origin:(origin,cb)=>!origin||allowedOrigins.includes(origin)?cb(null,true):cb(new Error('Origin not allowed by CORS')),credentials:true}));
 app.use(express.json({ limit: '10mb' }));
-app.use(createProviderGate(['/api/ai','/api/gap','/api/cf-agentic-volunteer-dispatch','/api/cf-rag-over-organizational-playbooks','/api/cf-donor-engagement-scoring','/api/cf-field-photo-upload-tagging','/api/cf-compliance-audit-agent']));
+app.use(createProviderGate(['/api/gap','/api/cf-agentic-volunteer-dispatch','/api/cf-rag-over-organizational-playbooks','/api/cf-donor-engagement-scoring','/api/cf-field-photo-upload-tagging','/api/cf-compliance-audit-agent']));
 
 // Routes
 app.use('/api/auth', authRoutes);
