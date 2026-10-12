@@ -32,6 +32,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { pool } = require('../schema');
 const auth = require('../middleware/auth');
+const { createNativeAIRequest } = require('../services/nativeAIRequest');
 const { aiRateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
@@ -96,8 +97,10 @@ async function ensureFieldPhotoTable() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-async function callOpenRouter(systemPrompt, userMessage, apiKey, opts = {}) {
+async function callOpenRouter(systemPrompt, userMessage, apiKey, opts = {}, aiRequest) {
+  aiRequest.assertActive();
   const r = await fetch(OPENROUTER_API_URL, {
+    signal: aiRequest.signal,
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -116,8 +119,11 @@ async function callOpenRouter(systemPrompt, userMessage, apiKey, opts = {}) {
     }),
   });
   const data = await r.json();
-  if (data.error) throw new Error(data.error.message || 'OpenRouter error');
-  return data.choices?.[0]?.message?.content || '';
+  aiRequest.assertActive();
+  if (!r.ok || data.error) throw new Error(String(data.error?.message || 'OpenRouter error').replaceAll(apiKey, '[redacted]'));
+  const choice = data.choices?.[0];
+  if (choice?.message?.refusal || ['length', 'content_filter'].includes(choice?.finish_reason) || typeof choice?.message?.content !== 'string' || !choice.message.content.trim()) throw new Error('OpenRouter did not return a complete response. Please try again.');
+  return choice.message.content;
 }
 
 function csvEscape(v) {
@@ -130,6 +136,7 @@ function csvEscape(v) {
 // 1. Multi-language translation
 // ---------------------------------------------------------------------------
 router.post('/multi-language/translate', aiRateLimiter, async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(503).json({ error: 'AI service unavailable', missing: 'OPENROUTER_API_KEY' });
@@ -141,13 +148,18 @@ router.post('/multi-language/translate', aiRateLimiter, async (req, res) => {
     }
     const sys = 'You are a professional translator for U.S. nonprofit social-services materials. Preserve formal register, do not paraphrase. Respond ONLY with valid JSON: {"translation": string, "notes": [string]}';
     const userMsg = `Translate to ${target_language}${source_language ? ` (from ${source_language})` : ''}.\nContext: ${context || 'general client communication'}\n\nText:\n${text}`;
-    const raw = await callOpenRouter(sys, userMsg, apiKey, { temperature: 0.2 });
+    const raw = await callOpenRouter(sys, userMsg, apiKey, { temperature: 0.2 }, aiRequest);
     let parsed;
     try { parsed = JSON.parse(raw); } catch { parsed = { translation: raw, notes: [] }; }
+    await aiRequest.commit();
     res.json({ success: true, target_language, supported_languages: SUPPORTED_LANGUAGES, ...parsed });
   } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+
     res.status(500).json({ error: err.message });
-  }
+  } finally { await aiRequest.dispose(); }
 });
 
 // ---------------------------------------------------------------------------

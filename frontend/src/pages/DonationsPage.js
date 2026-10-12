@@ -1,3 +1,5 @@
+import AIWorkspaceModal from '../components/AIWorkspaceModal';
+import '../components/AIWorkspace.css';
 import React, { useState, useEffect } from 'react';
 import { donationsApi, extractData } from '../api';
 import Modal from '../components/Modal';
@@ -43,7 +45,7 @@ export default function DonationsPage({ showToast }) {
   if (selected && !showForm) return (
     <div>
       <button className="back-btn" onClick={() => setSelected(null)}>&larr; Back</button>
-      <div className="detail-view">
+      <AIWorkspaceModal title="Record details" onClose={() => setSelected(null)}>
         <div className="detail-header">
           <div><h3>{selected.donor_name || 'Anonymous'}</h3><div className="card-meta"><span className="badge" style={{ background: statusColor(selected.status) + '20', color: statusColor(selected.status) }}>{selected.status}</span></div></div>
           <div className="detail-actions">
@@ -56,7 +58,7 @@ export default function DonationsPage({ showToast }) {
             <div className="detail-field" key={k}><div className="field-label">{k}</div><div className="field-value">{v}</div></div>
           ))}
         </div>
-      </div>
+      </AIWorkspaceModal>
     </div>
   );
 

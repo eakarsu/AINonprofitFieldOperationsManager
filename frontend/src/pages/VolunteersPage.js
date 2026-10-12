@@ -1,3 +1,5 @@
+import AIWorkspaceModal from '../components/AIWorkspaceModal';
+import '../components/AIWorkspace.css';
 import React, { useState, useEffect } from 'react';
 import { volunteersApi, extractData } from '../api';
 import Modal from '../components/Modal';
@@ -47,7 +49,7 @@ export default function VolunteersPage({ showToast }) {
     return (
       <div>
         <button className="back-btn" onClick={() => setSelected(null)}>&larr; Back to Volunteers</button>
-        <div className="detail-view">
+        <AIWorkspaceModal title="Record details" onClose={() => setSelected(null)}>
           <div className="detail-header">
             <div>
               <h3>{selected.name}</h3>
@@ -66,7 +68,7 @@ export default function VolunteersPage({ showToast }) {
             <div className="detail-field"><div className="field-label">Skills</div><div className="field-value">{Array.isArray(selected.skills) ? selected.skills.join(', ') : 'N/A'}</div></div>
             <div className="detail-field"><div className="field-label">Geo</div><div className="field-value">{selected.geo_lat ? `${selected.geo_lat}, ${selected.geo_lng}` : 'N/A'}</div></div>
           </div>
-        </div>
+        </AIWorkspaceModal>
       </div>
     );
   }

@@ -12,6 +12,7 @@ import InventoryPage from './pages/InventoryPage';
 import IncidentsPage from './pages/IncidentsPage';
 import AIPage from './pages/AIPage';
 import AIPredictivePage from './pages/AIPredictivePage';
+import AIProgramPlanningPage from './pages/AIProgramPlanningPage';
 import AIBacklogPage from './pages/AIBacklogPage';
 import ImpactMetricsPage from './pages/ImpactMetricsPage';
 import GrantTrackingPage from './pages/GrantTrackingPage';
@@ -100,6 +101,7 @@ export default function App() {
           <Route path="/inventory" element={<InventoryPage showToast={showToast} />} />
           <Route path="/incidents" element={<IncidentsPage showToast={showToast} />} />
           <Route path="/ai" element={<AIPage showToast={showToast} />} />
+          <Route path="/ai-program-planning" element={<AIProgramPlanningPage />} />
           <Route path="/ai-predictive" element={<AIPredictivePage showToast={showToast} />} />
           <Route path="/ai-backlog" element={<AIBacklogPage showToast={showToast} />} />
           <Route path="/impact-metrics" element={<ImpactMetricsPage showToast={showToast} />} />

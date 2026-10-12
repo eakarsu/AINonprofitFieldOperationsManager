@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { incidentsApi, aiApi, extractData } from '../api';
+import useNativeAIRequest from '../components/useNativeAIRequest';
+import NativeAIControls from '../components/NativeAIControls';
+import AIResultView from './AIResultView';
+import { incidentsApi, aiApi } from '../api';
 import Modal from '../components/Modal';
 import Pagination from '../components/Pagination';
 
@@ -13,17 +16,21 @@ export default function IncidentsPage({ showToast }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(empty);
   const [editing, setEditing] = useState(false);
-  const [clusterResult, setClusterResult] = useState(null);
-  const [clusterLoading, setClusterLoading] = useState(false);
+  const clusterRequest = useNativeAIRequest();
+  const clusterResult = clusterRequest.result?.result, clusterLoading = clusterRequest.loading;
+  const [listLoading, setListLoading] = useState(true), [listError, setListError] = useState('');
 
   useEffect(() => { load(); }, [page]);
 
   const load = async () => {
+    setListLoading(true); setListError('');
     try {
       const r = await incidentsApi.getAll(page, 20);
-      setItems(extractData(r));
+      const rows = Array.isArray(r) ? r : r?.data;
+      if (!Array.isArray(rows)) throw new Error('The saved incident list returned an unexpected response.');
+      setItems(rows);
       if (r.pagination) setPagination(r.pagination);
-    } catch (e) { console.error(e); }
+    } catch (e) { setListError(e.response?.data?.error || e.message || 'Could not load saved incidents.'); } finally { setListLoading(false); }
   };
 
   const handleSave = async () => {
@@ -41,13 +48,8 @@ export default function IncidentsPage({ showToast }) {
   };
 
   const handleCluster = async () => {
-    setClusterLoading(true); setClusterResult(null);
-    try {
-      const r = await aiApi.incidentCluster({});
-      setClusterResult(r.result);
-      showToast('AI pattern analysis complete');
-    } catch (e) { showToast(e.response?.data?.error || e.message, 'error'); }
-    setClusterLoading(false);
+    const response = await clusterRequest.run(options => aiApi.incidentCluster({}, options));
+    if (response !== undefined) showToast('AI pattern analysis complete');
   };
 
   const severityColor = { low: '#10b981', medium: '#f59e0b', high: '#f97316', critical: '#ef4444' };
@@ -57,34 +59,15 @@ export default function IncidentsPage({ showToast }) {
       <div className="page-header">
         <div><h2>Incidents</h2><p className="subtitle">Safety incidents and field reports</p></div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-ai" onClick={handleCluster} disabled={clusterLoading}>{clusterLoading ? 'Analyzing...' : 'AI Pattern Analysis'}</button>
+          <button className="btn btn-ai" onClick={handleCluster} disabled={clusterLoading}>{clusterLoading ? 'Analyzing...' : 'Generate with OpenRouter'}</button>
           <button className="btn btn-primary" onClick={() => { setForm(empty); setEditing(false); setShowForm(true); }}>+ Report Incident</button>
         </div>
       </div>
 
-      {clusterResult && (
-        <div style={{ background: '#1a1d2e', border: '1px solid #f59e0b', borderRadius: 10, padding: 20, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-            <h3 style={{ color: '#f59e0b' }}>AI Pattern Analysis (Last 90 Days)</h3>
-            <button className="btn btn-secondary btn-sm" onClick={() => setClusterResult(null)}>x</button>
-          </div>
-          {clusterResult.clusters?.map((c, i) => (
-            <div key={i} style={{ background: 'rgba(245,158,11,0.08)', borderRadius: 7, padding: '10px 14px', marginBottom: 8, borderLeft: `3px solid ${({ critical: '#ef4444', high: '#f97316', medium: '#f59e0b', low: '#10b981' }[c.risk_level] || '#6b7280')}` }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <strong style={{ color: '#e2e8f0' }}>{c.cluster_name}</strong>
-                <span style={{ fontSize: 11, color: '#6b7280' }}>{c.frequency} incidents | {c.severity_trend}</span>
-              </div>
-              {c.recommendations?.map((rec, j) => <div key={j} style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>- {rec}</div>)}
-            </div>
-          ))}
-          {clusterResult.priority_interventions?.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#ef4444', marginBottom: 6 }}>Priority Interventions</div>
-              {clusterResult.priority_interventions.map((i, j) => <div key={j} style={{ fontSize: 12, color: '#9ca3af' }}>- {i}</div>)}
-            </div>
-          )}
-        </div>
-      )}
+      <NativeAIControls request={clusterRequest} />
+      <p>This analysis uses saved incidents from the last 90 days. Its native request has no editable AI parameters; it does not create or change incident records.</p>
+      {clusterResult && <AIResultView result={clusterResult} title="Incident patterns · last 90 days" />}
+      {listLoading && <p role="status">Loading saved incidents…</p>}{listError && <div role="alert">{listError} <button type="button" className="btn btn-secondary" onClick={load}>Retry incidents</button></div>}
 
       <div className="stats-row">
         <div className="stat-box"><div className="stat-number">{pagination ? pagination.total : items.length}</div><div className="stat-label">Total</div></div>
@@ -117,8 +100,9 @@ export default function IncidentsPage({ showToast }) {
               ))}
             </div>
             <div className="modal-footer">
-              <button className="btn btn-secondary" onClick={() => { setForm({ ...selected }); setEditing(true); setShowForm(true); setSelected(null); }}>Edit</button>
+              <button className="btn btn-secondary" onClick={() => { setForm({ ...selected }); setEditing(true); setShowForm(true); }}>Edit</button>
               <button className="btn btn-danger" onClick={() => handleDelete(selected.id)}>Delete</button>
+              <button className="btn btn-secondary" onClick={() => setSelected(null)}>Cancel</button>
             </div>
           </div>
         </div>

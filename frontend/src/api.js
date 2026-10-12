@@ -25,7 +25,7 @@ export const authApi = {
 };
 
 export const volunteersApi = {
-  getAll: (page = 1, limit = 20) => api.get(`/volunteers?page=${page}&limit=${limit}`).then(r => r.data),
+  getAll: (page = 1, limit = 20, options = {}) => api.get(`/volunteers?page=${page}&limit=${limit}`, options).then(r => r.data),
   getOne: (id) => api.get(`/volunteers/${id}`).then(r => r.data),
   create: (data) => api.post('/volunteers', data).then(r => r.data),
   update: (id, data) => api.put(`/volunteers/${id}`, data).then(r => r.data),
@@ -41,7 +41,7 @@ export const shiftsApi = {
 };
 
 export const programsApi = {
-  getAll: (page = 1, limit = 20) => api.get(`/programs?page=${page}&limit=${limit}`).then(r => r.data),
+  getAll: (page = 1, limit = 20, options = {}) => api.get(`/programs?page=${page}&limit=${limit}`, options).then(r => r.data),
   getOne: (id) => api.get(`/programs/${id}`).then(r => r.data),
   create: (data) => api.post('/programs', data).then(r => r.data),
   update: (id, data) => api.put(`/programs/${id}`, data).then(r => r.data),
@@ -49,7 +49,7 @@ export const programsApi = {
 };
 
 export const casesApi = {
-  getAll: (page = 1, limit = 20) => api.get(`/cases?page=${page}&limit=${limit}`).then(r => r.data),
+  getAll: (page = 1, limit = 20, options = {}) => api.get(`/cases?page=${page}&limit=${limit}`, options).then(r => r.data),
   getOne: (id) => api.get(`/cases/${id}`).then(r => r.data),
   create: (data) => api.post('/cases', data).then(r => r.data),
   update: (id, data) => api.put(`/cases/${id}`, data).then(r => r.data),
@@ -81,30 +81,30 @@ export const incidentsApi = {
 };
 
 export const aiApi = {
-  triageCase: (data) => api.post('/ai/triage-case', data).then(r => r.data),
-  dispatchVolunteer: (data) => api.post('/ai/dispatch-volunteer', data).then(r => r.data),
-  grantReport: (data) => api.post('/ai/grant-report', data).then(r => r.data),
-  incidentCluster: (data) => api.post('/ai/incident-cluster', data).then(r => r.data),
-  inventoryRestock: (data) => api.post('/ai/inventory-restock', data).then(r => r.data),
-  impactReport: (data) => api.post('/ai/impact-report', data).then(r => r.data),
-  beneficiaryNeeds: (data) => api.post('/ai/beneficiary-needs', data).then(r => r.data),
-  grantApplication: (data) => api.post('/ai/grant-application', data).then(r => r.data),
-  programEvaluation: (data) => api.post('/ai/program-evaluation', data).then(r => r.data),
-  caseResolutionPredict: (data) => api.post('/ai/case-resolution-predict', data).then(r => r.data),
-  donationForecast: (data) => api.post('/ai/donation-forecast', data).then(r => r.data),
-  shiftOptimization: (data) => api.post('/ai/shift-optimization', data).then(r => r.data),
-  programRiskAssessment: (data) => api.post('/ai/program-risk-assessment', data).then(r => r.data),
+  triageCase: (data, options = {}) => api.post('/ai/triage-case', data, options).then(r => r.data),
+  dispatchVolunteer: (data, options = {}) => api.post('/ai/dispatch-volunteer', data, options).then(r => r.data),
+  grantReport: (data, options = {}) => api.post('/ai/grant-report', data, options).then(r => r.data),
+  incidentCluster: (data, options = {}) => api.post('/ai/incident-cluster', data, options).then(r => r.data),
+  inventoryRestock: (data, options = {}) => api.post('/ai/inventory-restock', data, options).then(r => r.data),
+  impactReport: (data, options = {}) => api.post('/ai/impact-report', data, options).then(r => r.data),
+  beneficiaryNeeds: (data, options = {}) => api.post('/ai/beneficiary-needs', data, options).then(r => r.data),
+  grantApplication: (data, options = {}) => api.post('/ai/grant-application', data, options).then(r => r.data),
+  programEvaluation: (data, options = {}) => api.post('/ai/program-evaluation', data, options).then(r => r.data),
+  caseResolutionPredict: (data, options = {}) => api.post('/ai/case-resolution-predict', data, options).then(r => r.data),
+  donationForecast: (data, options = {}) => api.post('/ai/donation-forecast', data, options).then(r => r.data),
+  shiftOptimization: (data, options = {}) => api.post('/ai/shift-optimization', data, options).then(r => r.data),
+  programRiskAssessment: (data, options = {}) => api.post('/ai/program-risk-assessment', data, options).then(r => r.data),
   getHistory: (page = 1, limit = 20) => api.get(`/ai/history?page=${page}&limit=${limit}`).then(r => r.data),
   // Apply pass 5 — full backlog
-  translate: (data) => api.post('/ai/multi-language/translate', data).then(r => r.data),
-  bulkSms: (data) => api.post('/ai/bulk-sms', data).then(r => r.data),
-  bulkEmail: (data) => api.post('/ai/bulk-email', data).then(r => r.data),
-  reportCasesCsv: () => api.get('/ai/reports/cases.csv', { responseType: 'blob' }).then(r => r.data),
-  reportDonationsCsv: () => api.get('/ai/reports/donations.csv', { responseType: 'blob' }).then(r => r.data),
-  auditTrailLog: (data) => api.post('/ai/audit-trail/log', data).then(r => r.data),
-  auditTrailList: (limit = 100) => api.get(`/ai/audit-trail?limit=${limit}`).then(r => r.data),
-  uploadFieldPhoto: (data) => api.post('/ai/field-photo', data).then(r => r.data),
-  listFieldPhotos: (limit = 50) => api.get(`/ai/field-photos?limit=${limit}`).then(r => r.data),
+  translate: (data, options = {}) => api.post('/ai/multi-language/translate', data, options).then(r => r.data),
+  bulkSms: (data, options = {}) => api.post('/ai/bulk-sms', data, options).then(r => r.data),
+  bulkEmail: (data, options = {}) => api.post('/ai/bulk-email', data, options).then(r => r.data),
+  reportCasesCsv: (options = {}) => api.get('/ai/reports/cases.csv', { ...options, responseType: 'blob' }).then(r => r.data),
+  reportDonationsCsv: (options = {}) => api.get('/ai/reports/donations.csv', { ...options, responseType: 'blob' }).then(r => r.data),
+  auditTrailLog: (data, options = {}) => api.post('/ai/audit-trail/log', data, options).then(r => r.data),
+  auditTrailList: (limit = 100, options = {}) => api.get(`/ai/audit-trail?limit=${limit}`, options).then(r => r.data),
+  uploadFieldPhoto: (data, options = {}) => api.post('/ai/field-photo', data, options).then(r => r.data),
+  listFieldPhotos: (limit = 50, options = {}) => api.get(`/ai/field-photos?limit=${limit}`, options).then(r => r.data),
 };
 
 export const dashboardApi = {

@@ -1,3 +1,5 @@
+import AIWorkspaceModal from '../components/AIWorkspaceModal';
+import '../components/AIWorkspace.css';
 import React, { useState, useEffect } from 'react';
 import { programsApi, extractData } from '../api';
 import Modal from '../components/Modal';
@@ -41,7 +43,7 @@ export default function ProgramsPage({ showToast }) {
     return (
       <div>
         <button className="back-btn" onClick={() => setSelected(null)}>&larr; Back to Programs</button>
-        <div className="detail-view">
+        <AIWorkspaceModal title="Record details" onClose={() => setSelected(null)}>
           <div className="detail-header">
             <div><h3>{selected.name}</h3><div className="card-meta" style={{ marginTop: 8 }}><span className={`badge badge-${selected.status}`}>{selected.status}</span></div></div>
             <div className="detail-actions">
@@ -54,7 +56,7 @@ export default function ProgramsPage({ showToast }) {
             <div className="detail-field"><div className="field-label">Capacity</div><div className="field-value">{selected.capacity}</div></div>
           </div>
           <div className="detail-field"><div className="field-label">Description</div><div className="field-value">{selected.description || 'No description'}</div></div>
-        </div>
+        </AIWorkspaceModal>
       </div>
     );
   }

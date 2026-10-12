@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../schema');
 const auth = require('../middleware/auth');
+const { createNativeAIRequest } = require('../services/nativeAIRequest');
 const { aiRateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
@@ -8,8 +9,10 @@ const router = express.Router();
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
 
-async function callAI(systemPrompt, userMessage, apiKey) {
+async function callAI(systemPrompt, userMessage, apiKey, aiRequest) {
+  aiRequest.assertActive();
   const response = await fetch(OPENROUTER_API_URL, {
+    signal: aiRequest.signal,
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -28,8 +31,11 @@ async function callAI(systemPrompt, userMessage, apiKey) {
     }),
   });
   const data = await response.json();
-  if (data.error) throw new Error(data.error.message || 'OpenRouter error');
-  return data.choices?.[0]?.message?.content || '';
+  aiRequest.assertActive();
+  if (!response.ok || data.error) throw new Error(String(data.error?.message || 'OpenRouter error').replaceAll(apiKey, '[redacted]'));
+  const choice = data.choices?.[0];
+  if (choice?.message?.refusal || ['length', 'content_filter'].includes(choice?.finish_reason) || typeof choice?.message?.content !== 'string' || !choice.message.content.trim()) throw new Error('OpenRouter did not return a complete response. Please try again.');
+  return choice.message.content;
 }
 
 function parseJSON(text) {
@@ -38,13 +44,13 @@ function parseJSON(text) {
   try { return JSON.parse(text); } catch (_) { return { raw: text }; }
 }
 
-async function persistResult(userId, endpoint, inputData, result) {
+async function persistResult(userId, endpoint, inputData, result, aiRequest, options = {}) {
   try {
-    await pool.query(
+    await aiRequest.query(
       'INSERT INTO ai_results (user_id, endpoint, input_data, result) VALUES ($1, $2, $3, $4)',
       [userId, endpoint, JSON.stringify(inputData), JSON.stringify(result)]
     );
-  } catch (err) { console.error('Failed to persist AI result:', err.message); }
+  } catch (err) { if (aiRequest.signal.aborted || options.strict) throw err;  console.error('Failed to persist AI result:', err.message); }
 }
 
 // Apply auth + rate limit to all AI routes
@@ -52,6 +58,7 @@ router.use(auth, aiRateLimiter);
 
 // POST /api/ai/triage-case
 router.post('/triage-case', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
@@ -74,20 +81,26 @@ Needs: ${Array.isArray(needs) ? needs.join(', ') : needs || 'Not specified'}
 Initial Urgency Score: ${urgency_score || 5}/10
 Demographics: ${demographics || 'Not provided'}`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
 
     if (case_id) {
-      await pool.query('UPDATE cases SET ai_triage = $1 WHERE id = $2', [JSON.stringify(parsed), case_id]).catch(() => {});
+      await aiRequest.query('UPDATE cases SET ai_triage = $1 WHERE id = $2', [JSON.stringify(parsed), case_id]).catch(() => {});
     }
-    await persistResult(req.user.id, 'triage-case', req.body, parsed);
+    await persistResult(req.user.id, 'triage-case', req.body, parsed, aiRequest);
 
+    await aiRequest.commit();
     res.json({ success: true, result: parsed });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/dispatch-volunteer
 router.post('/dispatch-volunteer', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
@@ -97,10 +110,10 @@ router.post('/dispatch-volunteer', async (req, res) => {
     // Fetch available volunteers from DB
     let volunteers = [];
     if (volunteer_ids && volunteer_ids.length > 0) {
-      const r = await pool.query('SELECT * FROM volunteers WHERE id = ANY($1) AND status = $2', [volunteer_ids, 'active']);
+      const r = await aiRequest.query('SELECT * FROM volunteers WHERE id = ANY($1) AND status = $2', [volunteer_ids, 'active']);
       volunteers = r.rows;
     } else {
-      const r = await pool.query("SELECT * FROM volunteers WHERE status = 'active' LIMIT 50");
+      const r = await aiRequest.query("SELECT * FROM volunteers WHERE status = 'active' LIMIT 50");
       volunteers = r.rows;
     }
 
@@ -122,16 +135,22 @@ router.post('/dispatch-volunteer', async (req, res) => {
     const userMsg = `Shift Requirements: ${JSON.stringify(shift_requirements)}
 Available Volunteers: ${JSON.stringify(volunteers.map(v => ({ id: v.id, name: v.name, skills: v.skills, location: v.location, availability: v.availability })))}`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
 
-    await persistResult(req.user.id, 'dispatch-volunteer', req.body, parsed);
+    await persistResult(req.user.id, 'dispatch-volunteer', req.body, parsed, aiRequest);
+    await aiRequest.commit();
     res.json({ success: true, result: parsed });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/grant-report
 router.post('/grant-report', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
@@ -140,12 +159,12 @@ router.post('/grant-report', async (req, res) => {
 
     // Query stats from DB
     const programResult = program_id
-      ? await pool.query('SELECT * FROM programs WHERE id = $1', [program_id])
+      ? await aiRequest.query('SELECT * FROM programs WHERE id = $1', [program_id])
       : { rows: [] };
     const caseCountResult = program_id
-      ? await pool.query("SELECT COUNT(*) FROM cases WHERE program_id = $1 AND status != 'open'", [program_id])
-      : await pool.query("SELECT COUNT(*) FROM cases WHERE status != 'open'");
-    const volunteerHours = await pool.query(`
+      ? await aiRequest.query("SELECT COUNT(*) FROM cases WHERE program_id = $1 AND status != 'open'", [program_id])
+      : await aiRequest.query("SELECT COUNT(*) FROM cases WHERE status != 'open'");
+    const volunteerHours = await aiRequest.query(`
       SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (check_out_time - check_in_time))/3600), 0) as total_hours
       FROM shifts WHERE status = 'completed' AND check_in_time IS NOT NULL AND check_out_time IS NOT NULL
       ${program_id ? 'AND program_id = $1' : ''}
@@ -169,21 +188,27 @@ Statistics:
 
 Please draft a professional grant outcome report with: Executive Summary, Program Impact, Quantitative Outcomes, Qualitative Impact, Challenges & Solutions, and Next Steps.`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
 
-    await persistResult(req.user.id, 'grant-report', req.body, { report: raw, stats });
+    await persistResult(req.user.id, 'grant-report', req.body, { report: raw, stats }, aiRequest);
+    await aiRequest.commit();
     res.json({ success: true, result: { report: raw, stats } });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/incident-cluster
 router.post('/incident-cluster', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
 
     // Fetch last 90 days incidents
-    const incidentsResult = await pool.query(
+    const incidentsResult = await aiRequest.query(
       "SELECT id, location, incident_type, description, severity, created_at FROM incidents WHERE created_at >= NOW() - INTERVAL '90 days' ORDER BY created_at DESC"
     );
     const incidents = incidentsResult.rows;
@@ -208,22 +233,35 @@ router.post('/incident-cluster', async (req, res) => {
 
     const userMsg = `Incidents from last 90 days (${incidents.length} total):\n${JSON.stringify(incidents, null, 2)}`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
 
-    await persistResult(req.user.id, 'incident-cluster', { incident_count: incidents.length }, parsed);
+    await persistResult(req.user.id, 'incident-cluster', { incident_count: incidents.length }, parsed, aiRequest);
+    await aiRequest.commit();
     res.json({ success: true, result: parsed, incident_count: incidents.length });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/inventory-restock
 router.post('/inventory-restock', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
 
+    const { program_id, constraints, priority_areas } = req.body || {};
+    let programContext = 'All saved programs';
+    if (program_id) {
+      const program = await aiRequest.query('SELECT id, name FROM programs WHERE id = $1', [program_id]);
+      if (!program.rows[0]) return res.status(404).json({ error: 'The selected saved program is unavailable.' });
+      programContext = program.rows[0].name;
+    }
     // Fetch items below min_threshold
-    const result = await pool.query('SELECT * FROM inventory WHERE quantity <= min_threshold ORDER BY (min_threshold - quantity) DESC');
+    const result = await aiRequest.query('SELECT * FROM inventory WHERE quantity <= min_threshold ORDER BY (min_threshold - quantity) DESC');
     const lowItems = result.rows;
 
     const systemPrompt = `You are an inventory and donor relations AI for a nonprofit. Generate a restocking wish list and donor appeal text. Respond ONLY with a JSON object:
@@ -244,18 +282,24 @@ router.post('/inventory-restock', async (req, res) => {
   "campaign_suggestions": ["<suggestion>"]
 }`;
 
-    const userMsg = `Inventory items at or below minimum threshold (${lowItems.length} items):\n${JSON.stringify(lowItems, null, 2)}`;
+    const userMsg = `Inventory items at or below minimum threshold (${lowItems.length} items):\n${JSON.stringify(lowItems, null, 2)}\nProgram context: ${programContext}\nUser-supplied planning constraints: ${constraints || 'Not provided'}\nUser-supplied priority areas: ${priority_areas || 'Not provided'}\nThese constraints and priorities are draft planning context. Do not infer budget, approval, supply allocation, or verified outcomes.`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
 
-    await persistResult(req.user.id, 'inventory-restock', { low_items_count: lowItems.length }, parsed);
+    await persistResult(req.user.id, 'inventory-restock', { low_items_count: lowItems.length, program_id: program_id || null, constraints: constraints || '', priority_areas: priority_areas || '' }, parsed, aiRequest);
+    await aiRequest.commit();
     res.json({ success: true, result: parsed, low_items: lowItems });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/impact-report — generate program impact report
 router.post('/impact-report', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
@@ -264,13 +308,13 @@ router.post('/impact-report', async (req, res) => {
 
     // Fetch data from multiple tables
     const programResult = program_id
-      ? await pool.query('SELECT * FROM programs WHERE id = $1', [program_id])
+      ? await aiRequest.query('SELECT * FROM programs WHERE id = $1', [program_id])
       : { rows: [] };
 
     const [caseCount, volunteerCount, incidentCount] = await Promise.all([
-      pool.query(program_id ? 'SELECT COUNT(*), status FROM cases WHERE program_id = $1 GROUP BY status' : 'SELECT COUNT(*), status FROM cases GROUP BY status', program_id ? [program_id] : []),
-      pool.query("SELECT COUNT(*) FROM volunteers WHERE status = 'active'"),
-      pool.query("SELECT COUNT(*) FROM incidents WHERE created_at >= NOW() - INTERVAL '90 days'")
+      aiRequest.query(program_id ? 'SELECT COUNT(*), status FROM cases WHERE program_id = $1 GROUP BY status' : 'SELECT COUNT(*), status FROM cases GROUP BY status', program_id ? [program_id] : []),
+      aiRequest.query("SELECT COUNT(*) FROM volunteers WHERE status = 'active'"),
+      aiRequest.query("SELECT COUNT(*) FROM incidents WHERE created_at >= NOW() - INTERVAL '90 days'")
     ]);
 
     const caseStats = {};
@@ -301,14 +345,20 @@ Additional Metrics: ${stats.custom_metrics || 'None provided'}
 
 Draft a comprehensive impact report including: Executive Summary, Quantitative Outcomes, Volunteer Impact, Safety Record, Stories of Change (1-2 illustrative examples), Challenges & Learnings, Looking Forward.`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
-    await persistResult(req.user.id, 'impact-report', req.body, { report: raw, stats });
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
+    await persistResult(req.user.id, 'impact-report', req.body, { report: raw, stats }, aiRequest);
+    await aiRequest.commit();
     res.json({ success: true, result: { report: raw, stats } });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/beneficiary-needs — assess beneficiary needs
 router.post('/beneficiary-needs', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
@@ -316,7 +366,7 @@ router.post('/beneficiary-needs', async (req, res) => {
     const { beneficiary_name, demographics, situation, location, case_id } = req.body;
 
     // Fetch recent similar cases for context
-    const similarCases = await pool.query(
+    const similarCases = await aiRequest.query(
       "SELECT client_name, needs, status FROM cases ORDER BY created_at DESC LIMIT 10"
     );
 
@@ -342,33 +392,42 @@ Situation: ${situation || 'Not provided'}
 Context from similar recent cases:
 ${similarCases.rows.map(c => `- ${c.client_name}: needs=${JSON.stringify(c.needs)}, status=${c.status}`).join('\n')}`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
 
     if (case_id) {
-      await pool.query('UPDATE cases SET ai_triage = $1 WHERE id = $2', [JSON.stringify(parsed), case_id]).catch(() => {});
+      await aiRequest.query('UPDATE cases SET ai_triage = $1 WHERE id = $2', [JSON.stringify(parsed), case_id]).catch(() => {});
     }
-    await persistResult(req.user.id, 'beneficiary-needs', req.body, parsed);
+    await persistResult(req.user.id, 'beneficiary-needs', req.body, parsed, aiRequest);
+    await aiRequest.commit();
     res.json({ success: true, result: parsed });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/grant-application — draft grant application
 router.post('/grant-application', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
 
     const { funder, program_id, amount_requested, project_description, deadline } = req.body;
+    if (amount_requested !== undefined && (!Number.isFinite(Number(amount_requested)) || Number(amount_requested) < 0)) return res.status(400).json({ error: 'amount_requested must be a nonnegative number' });
+    if (program_id && (!Number.isInteger(Number(program_id)) || Number(program_id) < 1)) return res.status(400).json({ error: 'program_id must identify a saved program' });
 
     const programResult = program_id
-      ? await pool.query('SELECT * FROM programs WHERE id = $1', [program_id])
+      ? await aiRequest.query('SELECT * FROM programs WHERE id = $1', [program_id])
       : { rows: [] };
+    if (program_id && !programResult.rows[0]) return res.status(404).json({ error: 'The selected saved program is unavailable.' });
     const program = programResult.rows[0] || {};
 
     const [caseStats, volCount] = await Promise.all([
-      pool.query(program_id ? "SELECT COUNT(*) FROM cases WHERE program_id = $1" : "SELECT COUNT(*) FROM cases", program_id ? [program_id] : []),
-      pool.query("SELECT COUNT(*) FROM volunteers WHERE status = 'active'")
+      aiRequest.query(program_id ? "SELECT COUNT(*) FROM cases WHERE program_id = $1" : "SELECT COUNT(*) FROM cases", program_id ? [program_id] : []),
+      aiRequest.query("SELECT COUNT(*) FROM volunteers WHERE status = 'active'")
     ]);
 
     const systemPrompt = `You are an expert grant writer AI for nonprofits. Draft a compelling grant application narrative.`;
@@ -389,14 +448,20 @@ Draft a grant application including:
 7. Budget Justification Summary
 8. Sustainability Plan`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
-    await persistResult(req.user.id, 'grant-application', req.body, { application: raw });
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
+    await persistResult(req.user.id, 'grant-application', req.body, { application: raw }, aiRequest, { strict: true });
+    await aiRequest.commit();
     res.json({ success: true, result: { application: raw } });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/program-evaluation — evaluate program effectiveness
 router.post('/program-evaluation', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
@@ -404,11 +469,12 @@ router.post('/program-evaluation', async (req, res) => {
     const { program_id } = req.body;
 
     const [program, cases, incidents] = await Promise.all([
-      program_id ? pool.query('SELECT * FROM programs WHERE id = $1', [program_id]) : { rows: [{}] },
-      pool.query(program_id ? 'SELECT status, urgency_score, needs FROM cases WHERE program_id = $1' : 'SELECT status, urgency_score, needs FROM cases', program_id ? [program_id] : []),
-      pool.query(program_id ? "SELECT severity, incident_type FROM incidents WHERE created_at >= NOW() - INTERVAL '90 days'" : "SELECT severity, incident_type FROM incidents WHERE created_at >= NOW() - INTERVAL '90 days'")
+      program_id ? aiRequest.query('SELECT * FROM programs WHERE id = $1', [program_id]) : { rows: [{}] },
+      aiRequest.query(program_id ? 'SELECT status, urgency_score, needs FROM cases WHERE program_id = $1' : 'SELECT status, urgency_score, needs FROM cases', program_id ? [program_id] : []),
+      aiRequest.query(program_id ? "SELECT severity, incident_type FROM incidents WHERE created_at >= NOW() - INTERVAL '90 days'" : "SELECT severity, incident_type FROM incidents WHERE created_at >= NOW() - INTERVAL '90 days'")
     ]);
 
+    if (program_id && !program.rows[0]) return res.status(404).json({ error: 'The selected saved program is unavailable.' });
     const prog = program.rows[0] || {};
     const caseList = cases.rows;
     const incidentList = incidents.rows;
@@ -432,14 +498,19 @@ router.post('/program-evaluation', async (req, res) => {
 Total Cases: ${caseList.length}
 Resolution Rate: ${resolvedPct}%
 Avg Urgency Score: ${avgUrgency}/10
-Recent Incidents: ${incidentList.length}
+Organization-wide recent incidents (native incidents have no program link): ${incidentList.length}
 Critical Incidents: ${incidentList.filter(i => i.severity === 'critical' || i.severity === 'high').length}`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
-    await persistResult(req.user.id, 'program-evaluation', req.body, parsed);
+    await persistResult(req.user.id, 'program-evaluation', req.body, parsed, aiRequest, { strict: true });
+    await aiRequest.commit();
     res.json({ success: true, result: parsed });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // GET /api/ai/history
@@ -466,90 +537,118 @@ router.get('/history', async (req, res) => {
 
 // POST /api/ai/case-resolution-predict
 router.post('/case-resolution-predict', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
-    const { case_id } = req.body || {};
+    const { case_id, needs, urgency, history_summary, available_resources } = req.body || {};
     let caseRow = null;
     if (case_id) {
-      try { const r = await pool.query('SELECT * FROM cases WHERE id=$1', [case_id]); caseRow = r.rows[0]; } catch {}
+      if (!Number.isInteger(Number(case_id)) || Number(case_id) < 1) return res.status(400).json({ error: 'case_id must identify an existing saved case' });
+      const saved = await aiRequest.query('SELECT * FROM cases WHERE id=$1', [case_id]);
+      caseRow = saved.rows[0];
+      if (!caseRow) return res.status(404).json({ error: 'The selected saved case is unavailable.' });
     }
     const systemPrompt = `Predict case-resolution time and resources. Respond ONLY with JSON:
 { "estimated_days_to_close": number, "confidence": "low"|"medium"|"high", "resources_needed": [string], "blockers_predicted": [string], "recommended_steps": [string] }`;
-    const userMsg = `Case data: ${JSON.stringify(caseRow || req.body)}`;
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const userMsg = `Saved case evidence: ${JSON.stringify(caseRow)}
+User-supplied planning context (unverified; does not update case evidence): ${JSON.stringify({ needs, urgency, history_summary, available_resources })}
+Source scope: ${caseRow ? 'Use the saved case as the factual source; distinguish supplied planning assumptions.' : 'Unlinked fictional planning scenario; no actual case history is asserted.'}`;
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
-    await persistResult(req.user.id, 'case-resolution-predict', req.body, parsed);
+    await persistResult(req.user.id, 'case-resolution-predict', req.body, parsed, aiRequest, { strict: true });
+    await aiRequest.commit();
     res.json({ success: true, result: parsed });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/donation-forecast
 router.post('/donation-forecast', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
-    const { donor_id, horizon_months } = req.body || {};
-    let donations = [];
-    try {
-      if (donor_id) {
-        const r = await pool.query('SELECT * FROM donations WHERE donor_id=$1 ORDER BY donation_date DESC LIMIT 50', [donor_id]);
-        donations = r.rows;
-      } else {
-        const r = await pool.query('SELECT * FROM donations ORDER BY donation_date DESC LIMIT 200');
-        donations = r.rows;
-      }
-    } catch {}
-    const systemPrompt = `Forecast donation activity. Respond ONLY with JSON:
-{ "horizon_months": number, "total_forecast_usd": number, "monthly_breakdown": [{"month": string, "amount": number}], "high_propensity_donors": [{"donor_id": any, "expected_amount": number, "next_gift_window": string}], "risk_of_churn": [{"donor_id": any, "reason": string}], "recommendations": [string] }`;
-    const userMsg = `Horizon (months): ${horizon_months || 6}\nDonations sample: ${JSON.stringify(donations).slice(0, 6000)}`;
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const { period, horizon_months, historical_data, upcoming_campaigns, economic_context, donor_id } = req.body || {};
+    if (donor_id !== undefined && donor_id !== null && donor_id !== '') return res.status(400).json({ error: 'This workspace has no saved donor identifier catalog. Review the organization-wide donation records instead.' });
+    const horizon = horizon_months === undefined ? ({ next_month: 1, next_quarter: 3, next_year: 12 }[period] || 6) : Number(horizon_months);
+    if (!Number.isInteger(horizon) || horizon < 1 || horizon > 36) return res.status(400).json({ error: 'horizon_months must be an integer from 1 to 36' });
+    const donations = (await aiRequest.query('SELECT id,donor_name,type,item_description,quantity,weight_lbs,location,status,created_at FROM donations ORDER BY created_at DESC LIMIT 200')).rows;
+    const systemPrompt = `Forecast donation activity. Distinguish saved in-kind records from user-supplied hypothetical monetary totals; do not assert saved dollar amounts where none exist. Respond ONLY with JSON:
+{ "horizon_months": number, "total_forecast_usd": number, "monthly_breakdown": [{"month": string, "amount": number}], "recommendations": [string], "assumptions": [string], "data_gaps": [string] }`;
+    const userMsg = `Horizon (months): ${horizon}
+Planning period: ${period || 'Not supplied'}
+User-supplied historical planning data (unverified): ${JSON.stringify(historical_data)}
+Upcoming campaigns (draft): ${JSON.stringify(upcoming_campaigns)}
+Economic context (draft): ${economic_context || 'Not supplied'}
+Saved donation evidence (in-kind schema; no donor_id, donation_date or amount column): ${JSON.stringify(donations).slice(0, 6000)}`;
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
-    await persistResult(req.user.id, 'donation-forecast', { donor_id, horizon_months }, parsed);
+    await persistResult(req.user.id, 'donation-forecast', { ...req.body, horizon_months: horizon }, parsed, aiRequest, { strict: true });
+    await aiRequest.commit();
     res.json({ success: true, result: parsed });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/shift-optimization
 router.post('/shift-optimization', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(500).json({ error: 'OpenRouter API key not configured' });
-    const { date_range, constraints } = req.body || {};
-    let shifts = [], volunteers = [];
-    try { const r = await pool.query('SELECT * FROM shifts ORDER BY start_time DESC LIMIT 100'); shifts = r.rows; } catch {}
-    try { const r = await pool.query('SELECT id, name, skills, availability FROM volunteers LIMIT 100'); volunteers = r.rows; } catch {}
-    const systemPrompt = `Balance volunteer shift load and satisfaction. Respond ONLY with JSON:
+    const { period_start, period_end, date_range, open_shifts, constraints } = req.body || {};
+    const validDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value + 'T00:00:00Z')) && new Date(value + 'T00:00:00Z').toISOString().slice(0, 10) === value;
+    if ((period_start && !validDate(period_start)) || (period_end && !validDate(period_end)) || (period_start && period_end && period_start > period_end)) return res.status(400).json({ error: 'The shift planning dates must be valid and ordered.' });
+    if (open_shifts !== undefined && (!Array.isArray(open_shifts) || open_shifts.some(shift => !shift || typeof shift.location !== 'string' || !validDate(shift.date) || !Number.isFinite(shift.hours) || shift.hours <= 0 || !Array.isArray(shift.skills) || shift.skills.some(skill => typeof skill !== 'string') || Object.keys(shift).some(key => !['location', 'date', 'hours', 'skills'].includes(key))))) return res.status(400).json({ error: 'Each hypothetical open shift needs location, date, positive hours and a string skills array; do not supply invented record IDs.' });
+    const shifts = (await aiRequest.query("SELECT * FROM shifts WHERE ($1::date IS NULL OR start_time >= $1::date) AND ($2::date IS NULL OR start_time < $2::date + INTERVAL '1 day') ORDER BY start_time DESC LIMIT 100", [period_start || null, period_end || null])).rows;
+    const volunteers = (await aiRequest.query('SELECT id, name, skills, availability FROM volunteers LIMIT 100')).rows;
+    const systemPrompt = `Balance volunteer shift load and satisfaction. Keep fictional open-shift scenarios separate from saved shift/volunteer identifiers; recommendations do not book or assign anything. Respond ONLY with JSON:
 { "shift_assignments": [{"shift_id": any, "volunteer_id": any, "fit_score": number, "rationale": string}], "underloaded_volunteers": [any], "overloaded_volunteers": [any], "rebalancing_actions": [string], "predicted_satisfaction_delta": number }`;
-    const userMsg = `Date range: ${date_range || 'next 14 days'}\nConstraints: ${JSON.stringify(constraints || {})}\nShifts: ${JSON.stringify(shifts).slice(0,3500)}\nVolunteers: ${JSON.stringify(volunteers).slice(0,3500)}`;
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const userMsg = `Date range: ${period_start || 'Not supplied'} through ${period_end || 'Not supplied'}; legacy planning label: ${date_range || 'next 14 days'}
+Constraints (draft): ${JSON.stringify(constraints || {})}
+Hypothetical open shifts (not saved records): ${JSON.stringify(open_shifts || [])}
+Saved shifts: ${JSON.stringify(shifts).slice(0,3500)}
+Saved volunteers: ${JSON.stringify(volunteers).slice(0,3500)}`;
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
-    await persistResult(req.user.id, 'shift-optimization', { date_range, constraints }, parsed);
+    await persistResult(req.user.id, 'shift-optimization', req.body, parsed, aiRequest, { strict: true });
+    await aiRequest.commit();
     res.json({ success: true, result: parsed });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 // POST /api/ai/program-risk-assessment
 router.post('/program-risk-assessment', async (req, res) => {
+  const aiRequest = createNativeAIRequest(req, res, pool);
   try {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return res.status(503).json({ error: 'AI service unavailable: OPENROUTER_API_KEY not configured' });
     const { program_id, lookback_days } = req.body || {};
     const days = Math.min(365, Math.max(1, parseInt(lookback_days, 10) || 90));
 
-    let program = null, recentCases = [], recentIncidents = [], recentDonations = [], recentShifts = [];
+    let program = null;
     if (program_id) {
-      try { const r = await pool.query('SELECT * FROM programs WHERE id = $1', [program_id]); program = r.rows[0] || null; } catch {}
-      try { const r = await pool.query(`SELECT id, status, urgency_score, created_at FROM cases WHERE program_id = $1 AND created_at > NOW() - INTERVAL '${days} days' ORDER BY created_at DESC LIMIT 200`, [program_id]); recentCases = r.rows; } catch {}
-      try { const r = await pool.query(`SELECT id, severity, created_at FROM incidents WHERE program_id = $1 AND created_at > NOW() - INTERVAL '${days} days' ORDER BY created_at DESC LIMIT 200`, [program_id]); recentIncidents = r.rows; } catch {}
-      try { const r = await pool.query(`SELECT id, amount, created_at FROM donations WHERE program_id = $1 AND created_at > NOW() - INTERVAL '${days} days' ORDER BY created_at DESC LIMIT 500`, [program_id]); recentDonations = r.rows; } catch {}
-      try { const r = await pool.query(`SELECT id, start_time, end_time, status FROM shifts WHERE program_id = $1 AND start_time > NOW() - INTERVAL '${days} days' ORDER BY start_time DESC LIMIT 200`, [program_id]); recentShifts = r.rows; } catch {}
-    } else {
-      try { const r = await pool.query(`SELECT id, status, urgency_score, created_at, program_id FROM cases WHERE created_at > NOW() - INTERVAL '${days} days' ORDER BY created_at DESC LIMIT 200`); recentCases = r.rows; } catch {}
-      try { const r = await pool.query(`SELECT id, severity, created_at, program_id FROM incidents WHERE created_at > NOW() - INTERVAL '${days} days' ORDER BY created_at DESC LIMIT 200`); recentIncidents = r.rows; } catch {}
-      try { const r = await pool.query(`SELECT id, amount, created_at, program_id FROM donations WHERE created_at > NOW() - INTERVAL '${days} days' ORDER BY created_at DESC LIMIT 500`); recentDonations = r.rows; } catch {}
+      if (!Number.isInteger(Number(program_id)) || Number(program_id) < 1) return res.status(400).json({ error: 'program_id must identify an existing saved program' });
+      const saved = await aiRequest.query('SELECT * FROM programs WHERE id = $1', [program_id]);
+      program = saved.rows[0];
+      if (!program) return res.status(404).json({ error: 'The selected saved program is unavailable.' });
     }
-
+    const cutoff = "NOW() - ($1::int * INTERVAL '1 day')";
+    const recentCases = (await aiRequest.query('SELECT id,status,urgency_score,created_at,program_id FROM cases WHERE created_at > ' + cutoff + ' AND ($2::int IS NULL OR program_id=$2) ORDER BY created_at DESC LIMIT 200', [days, program_id || null])).rows;
+    const recentShifts = (await aiRequest.query('SELECT id,start_time,end_time,status,program_id FROM shifts WHERE start_time > ' + cutoff + ' AND ($2::int IS NULL OR program_id=$2) ORDER BY start_time DESC LIMIT 200', [days, program_id || null])).rows;
+    const recentIncidents = (await aiRequest.query('SELECT id,severity,created_at,location FROM incidents WHERE created_at > ' + cutoff + ' ORDER BY created_at DESC LIMIT 200', [days])).rows;
+    const recentDonations = (await aiRequest.query('SELECT id,type,item_description,quantity,weight_lbs,created_at FROM donations WHERE created_at > ' + cutoff + ' ORDER BY created_at DESC LIMIT 500', [days])).rows;
     const systemPrompt = `You are a nonprofit program-risk analyst. Score multidimensional risk to a program based on the data summary. Respond ONLY with a JSON object:
 {
   "overall_risk_level": "low|moderate|high|critical",
@@ -570,16 +669,21 @@ router.post('/program-risk-assessment', async (req, res) => {
     const userMsg = `Program: ${JSON.stringify(program).slice(0, 1500)}
 Lookback (days): ${days}
 Cases (sample): ${JSON.stringify(recentCases).slice(0, 2500)}
-Incidents (sample): ${JSON.stringify(recentIncidents).slice(0, 2000)}
-Donations (sample): ${JSON.stringify(recentDonations).slice(0, 2000)}
+Organization-wide incidents (not program-linked): ${JSON.stringify(recentIncidents).slice(0, 2000)}
+Organization-wide in-kind donations (not program-linked; no saved monetary amounts): ${JSON.stringify(recentDonations).slice(0, 2000)}
 Shifts (sample): ${JSON.stringify(recentShifts).slice(0, 2000)}
 Counts: cases=${recentCases.length}, incidents=${recentIncidents.length}, donations=${recentDonations.length}, shifts=${recentShifts.length}`;
 
-    const raw = await callAI(systemPrompt, userMsg, apiKey);
+    const raw = await callAI(systemPrompt, userMsg, apiKey, aiRequest);
     const parsed = parseJSON(raw);
-    await persistResult(req.user.id, 'program-risk-assessment', { program_id: program_id || null, lookback_days: days }, parsed);
+    await persistResult(req.user.id, 'program-risk-assessment', { program_id: program_id || null, lookback_days: days, source_scope: { cases: program_id ? 'selected program' : 'organization-wide', shifts: program_id ? 'selected program' : 'organization-wide', incidents: 'organization-wide; no native program link', donations: 'organization-wide in-kind records; no native program link or monetary amount' } }, parsed, aiRequest, { strict: true });
+    await aiRequest.commit();
     res.json({ success: true, result: parsed, input_summary: { program_id: program_id || null, lookback_days: days, cases: recentCases.length, incidents: recentIncidents.length, donations: recentDonations.length, shifts: recentShifts.length } });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await aiRequest.rollback();
+    if (aiRequest.disconnected) return;
+    if (aiRequest.timedOut) return res.status(504).json({ error: 'AI request timed out. Please try again.' });
+    res.status(500).json({ error: err.message }); } finally { await aiRequest.dispose(); }
 });
 
 module.exports = router;

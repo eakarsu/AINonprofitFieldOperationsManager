@@ -1,3 +1,4 @@
+import AIReportLibrary from "./AIReportLibrary";
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 
@@ -14,6 +15,7 @@ const navItems = [
   { path: '/grant-tracking', label: 'Grant Tracking', icon: '💰' },
   { path: '/custom-views', label: 'Field Views', icon: '🗺️' },
   { path: '/ai', label: 'AI Tools', icon: '🤖' },
+  { path: '/ai-program-planning', label: 'AI Program Planning', icon: '📝' },
   { path: '/ai-predictive', label: 'AI Predictive', icon: '🔮' },
   { path: '/ai-backlog', label: 'AI Backlog Tools', icon: '🧪' },
   // === Batch 06 Gaps & Frontend Mounts ===
@@ -61,6 +63,6 @@ export default function Sidebar({ user, onLogout }) {
         </div>
         <button className="btn btn-sm btn-secondary" onClick={onLogout}>Logout</button>
       </div>
-    </aside>
+    <AIReportLibrary /></aside>
   );
 }

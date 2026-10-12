@@ -94,7 +94,7 @@ port_free "$BACKEND_PORT"
 port_free "$FRONTEND_PORT"
 (cd "$PROJECT_DIR/backend" && BACKEND_PORT="$BACKEND_PORT" PORT="$BACKEND_PORT" node index.js) &
 CHILD_PIDS+=("$!")
-(cd "$PROJECT_DIR/frontend" && PORT="$FRONTEND_PORT" BROWSER=none npm start) &
+(cd "$PROJECT_DIR/frontend" && BACKEND_PORT="$BACKEND_PORT" PORT="$FRONTEND_PORT" BROWSER=none npm start) &
 CHILD_PIDS+=("$!")
 echo "Services started without installing, seeding, migrating, creating databases, or reclaiming ports."
 wait "${CHILD_PIDS[@]}"

@@ -1,4 +1,8 @@
+import useNativeAIRequest from '../components/useNativeAIRequest';
+import NativeAIControls from '../components/NativeAIControls';
+import ReadableAIReport from "./AIResultView";
 import React, { useState } from 'react';
+import useNonprofitSources from '../components/useNonprofitSources';
 import { aiApi } from '../api';
 
 const TOOLS = [
@@ -10,8 +14,8 @@ const TOOLS = [
 
 export default function AIPredictivePage({ showToast }) {
   const [activeTool, setActiveTool] = useState('case-resolution');
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
+  const request = useNativeAIRequest(); const { loading: loading, result: result, setResult: setResult } = request;
+
 
   const [caseForm, setCaseForm] = useState({
     case_id: '',
@@ -22,6 +26,7 @@ export default function AIPredictivePage({ showToast }) {
   });
   const [donationForm, setDonationForm] = useState({
     period: 'next_quarter',
+    horizon_months: 3,
     historical_data: '',
     upcoming_campaigns: '',
     economic_context: '',
@@ -37,25 +42,33 @@ export default function AIPredictivePage({ showToast }) {
     lookback_days: 90,
   });
 
-  const renderResult = (r) => {
-    if (!r) return null;
-    if (typeof r === 'string') {
-      return (
-        <div style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 8, padding: 16, marginTop: 16, fontSize: 13, color: '#e2e8f0', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>{r}</div>
-      );
-    }
-    return (
-      <pre style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 8, padding: 16, marginTop: 16, fontSize: 12, color: '#94a3b8', overflow: 'auto', maxHeight: 400 }}>
-        {JSON.stringify(r, null, 2)}
-      </pre>
-    );
+  const references = useNonprofitSources();
+  const sourceTool = activeTool === 'case-resolution' || activeTool === 'program-risk';
+  const selectedSource = activeTool === 'case-resolution' ? caseForm.case_id : programRiskForm.program_id;
+  const selectedRows = activeTool === 'case-resolution' ? references.cases : references.programs;
+  const invalidSource = sourceTool && selectedSource && !references.loading && !references.error && !selectedRows.some(row => String(row.id) === selectedSource);
+  const sourceBlocked = sourceTool && (references.loading || references.error || invalidSource);
+  const fillExample = (index, tool = activeTool) => {
+    const savedCase = references.choose('cases', caseForm.case_id, index);
+    const sameCase = savedCase && String(savedCase.id) === caseForm.case_id;
+    const savedProgram = references.choose('programs', programRiskForm.program_id, index);
+    const labels = ['Community support', 'Seasonal planning', 'Capacity review'];
+    if (tool === 'case-resolution') setCaseForm({
+      case_id: savedCase ? String(savedCase.id) : '',
+      needs: sameCase && caseForm.needs ? caseForm.needs : savedCase ? (savedCase.needs || []).join(', ') : ['food, housing', 'transport, healthcare', 'employment, childcare'][index],
+      urgency: sameCase ? caseForm.urgency : savedCase?.urgency_score ?? [6, 8, 4][index],
+      history_summary: sameCase && caseForm.history_summary ? caseForm.history_summary : savedCase ? 'Saved case status: ' + savedCase.status + '. Review the actual case history before relying on this draft analysis.' : 'Fictional planning scenario: support intake was completed last week; no saved case is linked.',
+      available_resources: ['Planning assumption: two case workers, food vouchers and a partner shelter.', 'Planning assumption: volunteer transport and health clinic appointments.', 'Planning assumption: employment adviser and childcare partners.'][index],
+    });
+    else if (tool === 'donation-forecast') setDonationForm({ period: ['next_month', 'next_quarter', 'next_year'][index], horizon_months: [1, 3, 12][index], historical_data: JSON.stringify([{ month: '2026-07', total: 12500 }, { month: '2026-08', total: 13200 }, { month: '2026-09', total: 12800 }]), upcoming_campaigns: ['Community giving, local sponsor drive', 'Winter outreach, matching gifts', 'Annual appeal, partner grants'][index], economic_context: 'Fictional planning data for ' + labels[index] + '. Donor budgets are uncertain; state assumptions and avoid guaranteed forecasts.' });
+    else if (tool === 'shift-optimization') setShiftForm({ period_start: '2026-11-01', period_end: ['2026-11-07', '2026-11-14', '2026-11-30'][index], open_shifts: JSON.stringify([{ location: 'Illustrative community center', date: '2026-11-02', hours: 4, skills: ['intake'] }, { location: 'Illustrative food pantry', date: '2026-11-03', hours: 3, skills: ['distribution'] }]), constraints: ['Maximum four-hour shifts; keep accessible transport available.', 'Preserve volunteer rest days; one trained lead per shift.', 'Balance coverage; confirm availability before assigning.'][index] });
+    else setProgramRiskForm({ program_id: savedProgram ? String(savedProgram.id) : '', lookback_days: [30, 90, 180][index] });
   };
+  const completePresets = ['Community support', 'Seasonal planning', 'Capacity review'].map((label, index) => ({ label, values: index }));
+  const selectTool = tool => { request.cancel(); setActiveTool(tool); setResult(null); if (!references.loading && !references.error || tool === 'donation-forecast' || tool === 'shift-optimization') fillExample(0, tool); };
+  const renderResult = r => r ? <ReadableAIReport result={r} /> : null;
 
-  const run = async () => {
-    setLoading(true);
-    setResult(null);
-    try {
-      let r;
+  const run = async () => { if (sourceBlocked) return; const result = await request.run(async (options) => {       let r;
       if (activeTool === 'case-resolution') {
         const body = {
           case_id: caseForm.case_id ? parseInt(caseForm.case_id, 10) : undefined,
@@ -66,10 +79,11 @@ export default function AIPredictivePage({ showToast }) {
         if (caseForm.needs) {
           body.needs = caseForm.needs.split(',').map((s) => s.trim()).filter(Boolean);
         }
-        r = await aiApi.caseResolutionPredict(body);
+        r = await aiApi.caseResolutionPredict(body,options);
       } else if (activeTool === 'donation-forecast') {
         const body = {
           period: donationForm.period,
+          horizon_months: Number(donationForm.horizon_months),
           economic_context: donationForm.economic_context,
         };
         if (donationForm.historical_data.trim()) {
@@ -83,7 +97,7 @@ export default function AIPredictivePage({ showToast }) {
           body.upcoming_campaigns = donationForm.upcoming_campaigns
             .split(',').map((s) => s.trim()).filter(Boolean);
         }
-        r = await aiApi.donationForecast(body);
+        r = await aiApi.donationForecast(body,options);
       } else if (activeTool === 'shift-optimization') {
         const body = {
           period_start: shiftForm.period_start,
@@ -97,21 +111,15 @@ export default function AIPredictivePage({ showToast }) {
             body.open_shifts = shiftForm.open_shifts;
           }
         }
-        r = await aiApi.shiftOptimization(body);
+        r = await aiApi.shiftOptimization(body,options);
       } else {
         const body = {
           program_id: programRiskForm.program_id ? parseInt(programRiskForm.program_id, 10) : undefined,
           lookback_days: parseInt(programRiskForm.lookback_days, 10) || 90,
         };
-        r = await aiApi.programRiskAssessment(body);
+        r = await aiApi.programRiskAssessment(body,options);
       }
-      setResult(r.result || r);
-      showToast && showToast('AI analysis complete');
-    } catch (e) {
-      showToast && showToast(e.response?.data?.error || e.message, 'error');
-    }
-    setLoading(false);
-  };
+ return r.result || r; }); if (result !== undefined) showToast && showToast('AI analysis complete'); };
 
   return (
     <div>
@@ -126,7 +134,7 @@ export default function AIPredictivePage({ showToast }) {
         {TOOLS.map((tool) => (
           <button
             key={tool.id}
-            onClick={() => { setActiveTool(tool.id); setResult(null); }}
+            onClick={() => selectTool(tool.id)}
             className={`btn ${activeTool === tool.id ? 'btn-ai' : 'btn-secondary'}`}
           >
             {tool.label}
@@ -134,13 +142,16 @@ export default function AIPredictivePage({ showToast }) {
         ))}
       </div>
 
+      <NativeAIControls request={request} presets={completePresets} blocked={sourceBlocked ? references.loading ? 'Loading saved case and program sources…' : invalidSource ? 'The selected saved source is no longer available. Choose a permitted source before generating.' : 'Retry the saved source list before generating.' : ''} onFill={(_, index) => fillExample(index)} />
+      {sourceTool && references.error && <div role="alert">{references.error} <button className="btn btn-secondary" type="button" onClick={references.retry}>Retry saved sources</button></div>}
+      {sourceTool && !references.loading && !references.error && !(activeTool === 'case-resolution' ? references.cases : references.programs).length && <p role="status">No saved {activeTool === 'case-resolution' ? 'case' : 'program'} is available. Examples fill every ordinary input; the optional source stays empty for {activeTool === 'case-resolution' ? 'an explicitly fictional unlinked scenario' : 'an organization-wide review'}.</p>}
       {activeTool === 'case-resolution' && (
         <div style={{ background: '#1a1d2e', border: '1px solid #2d3048', borderRadius: 10, padding: 24 }}>
           <h3 style={{ color: '#e2e8f0', marginBottom: 16 }}>Case Resolution Prediction</h3>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <div className="form-group">
               <label>Case ID (optional)</label>
-              <input className="form-control" type="number" value={caseForm.case_id} onChange={(e) => setCaseForm({ ...caseForm, case_id: e.target.value })} />
+              <select className="form-control" value={caseForm.case_id} onChange={e => { const saved = references.cases.find(row => String(row.id) === e.target.value); setCaseForm({ ...caseForm, case_id: e.target.value, needs: saved ? (saved.needs || []).join(', ') : caseForm.needs, urgency: saved?.urgency_score ?? caseForm.urgency, history_summary: saved ? 'Saved case status: ' + saved.status + '. Review the actual case history before relying on this draft analysis.' : caseForm.history_summary }); }}><option value="">Unlinked fictional scenario</option>{references.cases.map(row => <option key={row.id} value={String(row.id)}>{row.client_name || 'Saved case ' + row.id}</option>)}</select>
             </div>
             <div className="form-group">
               <label>Urgency (1-10)</label>
@@ -173,6 +184,7 @@ export default function AIPredictivePage({ showToast }) {
               <option value="next_year">Next Year</option>
             </select>
           </div>
+          <div className="form-group"><label>Horizon (months, optional)</label><input className="form-control" type="number" min="1" max="36" step="1" value={donationForm.horizon_months} onChange={e => setDonationForm({ ...donationForm, horizon_months: e.target.value })} /></div>
           <div className="form-group">
             <label>Historical Data (JSON or text)</label>
             <textarea className="form-control" rows={4} value={donationForm.historical_data} onChange={(e) => setDonationForm({ ...donationForm, historical_data: e.target.value })} placeholder='[{"month":"Jan 2025","total":12500}]' />
@@ -203,7 +215,7 @@ export default function AIPredictivePage({ showToast }) {
           </div>
           <div className="form-group">
             <label>Open Shifts (JSON)</label>
-            <textarea className="form-control" rows={4} value={shiftForm.open_shifts} onChange={(e) => setShiftForm({ ...shiftForm, open_shifts: e.target.value })} placeholder='[{"id":1,"location":"Shelter","skills":["first-aid"]}]' />
+            <textarea className="form-control" rows={4} value={shiftForm.open_shifts} onChange={(e) => setShiftForm({ ...shiftForm, open_shifts: e.target.value })} placeholder='[{"location":"Illustrative shelter","date":"2026-11-02","hours":4,"skills":["first-aid"]}]' />
           </div>
           <div className="form-group">
             <label>Constraints</label>
@@ -218,20 +230,20 @@ export default function AIPredictivePage({ showToast }) {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <div className="form-group">
               <label>Program ID (optional)</label>
-              <input className="form-control" type="number" value={programRiskForm.program_id} onChange={(e) => setProgramRiskForm({ ...programRiskForm, program_id: e.target.value })} placeholder="Leave blank for org-wide" />
+              <select className="form-control" value={programRiskForm.program_id} onChange={e => setProgramRiskForm({ ...programRiskForm, program_id: e.target.value })}><option value="">Organization-wide review</option>{references.programs.map(row => <option key={row.id} value={String(row.id)}>{row.name || 'Saved program ' + row.id}</option>)}</select>
             </div>
             <div className="form-group">
               <label>Lookback Window (days)</label>
               <input className="form-control" type="number" min="1" max="365" value={programRiskForm.lookback_days} onChange={(e) => setProgramRiskForm({ ...programRiskForm, lookback_days: e.target.value })} />
             </div>
           </div>
-          <p style={{ color: '#94a3b8', fontSize: 12, marginTop: 8 }}>Pulls recent cases, incidents, donations, and shifts for the program and returns a multi-dimensional risk score.</p>
+          <p style={{ color: '#94a3b8', fontSize: 12, marginTop: 8 }}>Reviews saved program cases and shifts. Incident and donation records have no program link in this workspace and are labeled organization-wide context; the report remains advisory.</p>
         </div>
       )}
 
       <div style={{ marginTop: 16 }}>
-        <button className="btn btn-ai" disabled={loading} onClick={run}>
-          {loading ? 'Running...' : 'Run AI'}
+        <button className="btn btn-ai" disabled={loading || Boolean(sourceBlocked)} onClick={run}>
+          {loading ? 'Running...' : 'Generate with OpenRouter'}
         </button>
       </div>
 
